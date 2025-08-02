@@ -8,10 +8,10 @@ import voluptuous as vol
 
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME, UnitOfLength
-from homeassistant.core import callback, HomeAssistant
+from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME, UnitOfLength, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import callback, HomeAssistant, State
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time_interval, async_track_state_change_event
 
 from homeassistant.util.json import json_loads_object
 from homeassistant.util.unit_system import IMPERIAL_SYSTEM
@@ -25,6 +25,7 @@ from .const import (
     CONF_MAX_TRACKED_LIGHTNINGS,
     CONF_RADIUS,
     CONF_TIME_WINDOW,
+    CONF_ENABLE_GEOCODING,
     CONF_DEVICE_TRACKER,
     CONF_TRACKING_MODE,
     DEFAULT_IDLE_RESET_TIMEOUT,
@@ -32,12 +33,14 @@ from .const import (
     DEFAULT_RADIUS,
     DEFAULT_TIME_WINDOW,
     DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_ENABLE_GEOCODING,
     DOMAIN,
     PLATFORMS,
     SERVER_STATS,
 )
 from .geohash_utils import geohash_overlap
 from .mqtt import MQTT, MQTT_CONNECTED, MQTT_DISCONNECTED
+from .geocoding_utils import GeocodingService
 from .version import __version__
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,8 +68,10 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: BlitzortungConfig
     radius = config_entry.options[CONF_RADIUS]
     max_tracked_lightnings = config_entry.options[CONF_MAX_TRACKED_LIGHTNINGS]
     time_window_seconds = config_entry.options[CONF_TIME_WINDOW] * 60
+    enable_geocoding = config_entry.options.get(CONF_ENABLE_GEOCODING, DEFAULT_ENABLE_GEOCODING)
     tracking_mode = config_entry.data.get(CONF_TRACKING_MODE, "static")
     device_tracker = config_entry.data.get(CONF_DEVICE_TRACKER)
+
 
     if max_tracked_lightnings >= 500:
         _LOGGER.warning(
@@ -90,6 +95,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: BlitzortungConfig
         max_tracked_lightnings,
         time_window_seconds,
         DEFAULT_UPDATE_INTERVAL,
+        enable_geocoding=enable_geocoding,
         tracking_mode=tracking_mode,
         device_tracker=device_tracker,
         server_stats=config.get(SERVER_STATS),
@@ -163,6 +169,10 @@ async def async_migrate_entry(hass, entry: BlitzortungConfigEntry):
             CONF_MAX_TRACKED_LIGHTNINGS: max_tracked_lightnings,
         }
 
+        # Add geocoding option if not present (for migration)
+        if CONF_ENABLE_GEOCODING not in entry.options:
+            new_options[CONF_ENABLE_GEOCODING] = DEFAULT_ENABLE_GEOCODING
+
         hass.config_entries.async_update_entry(
             entry, data=new_data, options=new_options, version=5
         )
@@ -180,6 +190,7 @@ class BlitzortungCoordinator:
         max_tracked_lightnings,
         time_window_seconds,
         update_interval,
+        enable_geocoding=True,
         tracking_mode="static",
         device_tracker=None,
         server_stats=False,
@@ -194,6 +205,7 @@ class BlitzortungCoordinator:
         self.max_tracked_lightnings = max_tracked_lightnings
         self.time_window_seconds = time_window_seconds
         self.server_stats = server_stats
+        self.enable_geocoding = enable_geocoding
         self.tracking_mode = tracking_mode
         self.device_tracker = device_tracker
         self.last_time = 0
@@ -208,11 +220,15 @@ class BlitzortungCoordinator:
         self.unloading = False
         self._location_available = True
 
+        # Initialize geocoding service if enabled
+        self.geocoding_service = GeocodingService(hass) if enable_geocoding else None
+
         _LOGGER.info(
             "lat: %s, lon: %s, radius: %skm, geohashes: %s",
             self.latitude,
             self.longitude,
             self.radius,
+            self.enable_geocoding,
             self.tracking_mode,
             self.device_tracker,
             self.geohash_overlap,
@@ -413,6 +429,30 @@ class BlitzortungCoordinator:
             self.compute_polar_coords(lightning)
             if lightning[SensorDeviceClass.DISTANCE] < self.radius:
                 _LOGGER.debug("lightning data: %s", lightning)
+                
+                # Add geocoding information if enabled
+                if self.geocoding_service:
+                    try:
+                        location_info = await self.geocoding_service.reverse_geocode(
+                            lightning["lat"], lightning["lon"]
+                        )
+                        if location_info:
+                            lightning["area"] = location_info.get("area_description", "Unknown")
+                            lightning["location"] = location_info.get("display_name", "Unknown")
+                            lightning["primary_area"] = location_info.get("primary_area", "Unknown")
+                            lightning["country"] = location_info.get("country", "Unknown")
+                            _LOGGER.debug("Geocoded lightning location: %s", lightning["area"])
+                        else:
+                            lightning["area"] = "Unknown"
+                            lightning["location"] = "Unknown"
+                    except Exception as e:
+                        _LOGGER.warning("Geocoding failed for lightning strike: %s", e)
+                        lightning["area"] = "Geocoding Failed"
+                        lightning["location"] = "Geocoding Failed"
+                else:
+                    lightning["area"] = "Geocoding Disabled"
+                    lightning["location"] = "Geocoding Disabled"
+                    
                 self.last_time = time.time()
                 for callback in self.lightning_callbacks:
                     await callback(lightning)
