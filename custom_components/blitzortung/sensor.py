@@ -33,12 +33,10 @@ from .const import (
     ATTRIBUTION,
     BLITZORTUNG_CONFIG,
     BLIZORTUNG_URL,
-    CONF_TRACKING_MODE,
-    CONF_DEVICE_TRACKER,
-    CONF_ENABLE_GEOCODING,
     DOMAIN,
     SERVER_STATS,
     SW_VERSION,
+    TRACKING_MODE_DEVICE_TRACKER,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,15 +59,9 @@ class BlitzortungSensor(SensorEntity):
         self.coordinator = coordinator
         self._attr_unique_id = f"{unique_prefix}-{description.key}"
         if description.name is UNDEFINED:
-            self._attr_name = f"Server {description.key.replace("_", " ").lower()}"
+            self._attr_name = f"Server {description.key.replace('_', ' ').lower()}"
         self._attr_attribution = ATTRIBUTION
-        
-        # Create device info based on tracking mode
-        if coordinator.tracking_mode == "Device Tracker" and coordinator.device_tracker:
-            device_name = f"{integration_name}"
-        else:
-            device_name = device_name
-            
+
         self._attr_device_info = DeviceInfo(
             name=integration_name,
             identifiers={(DOMAIN, unique_prefix)},
@@ -95,14 +87,12 @@ class BlitzortungSensor(SensorEntity):
             attrs.update(self._attr_extra_state_attributes)
         
         # Add tracking information
-        if self.coordinator.tracking_mode == "Device Tracker":
-            attrs["tracking_mode"] = "Device Tracker"
-            attrs["Device Tracker"] = self.coordinator.device_tracker
+        attrs["tracking_mode"] = self.coordinator.tracking_mode
+        if self.coordinator.tracking_mode == TRACKING_MODE_DEVICE_TRACKER:
+            attrs["device_tracker"] = self.coordinator.device_tracker
             attrs["current_lat"] = self.coordinator.latitude
             attrs["current_lon"] = self.coordinator.longitude
-        else:
-            attrs["tracking_mode"] = "Static"
-            
+
         return attrs
 
     async def async_added_to_hass(self):
