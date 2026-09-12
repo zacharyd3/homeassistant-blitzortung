@@ -6,10 +6,11 @@ import time
 
 import voluptuous as vol
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME, UnitOfLength, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import callback, HomeAssistant, State
+from homeassistant.core import callback, HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_time_interval, async_track_state_change_event
 
@@ -37,6 +38,9 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVER_STATS,
+    TRACKING_MODE_DEVICE_TRACKER,
+    TRACKING_MODE_STATIC,
+    normalize_tracking_mode,
 )
 from .geohash_utils import geohash_overlap
 from .mqtt import MQTT, MQTT_CONNECTED, MQTT_DISCONNECTED
@@ -69,7 +73,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: BlitzortungConfig
     max_tracked_lightnings = config_entry.options[CONF_MAX_TRACKED_LIGHTNINGS]
     time_window_seconds = config_entry.options[CONF_TIME_WINDOW] * 60
     enable_geocoding = config_entry.options.get(CONF_ENABLE_GEOCODING, DEFAULT_ENABLE_GEOCODING)
-    tracking_mode = config_entry.data.get(CONF_TRACKING_MODE, "static")
+    tracking_mode = normalize_tracking_mode(config_entry.data.get(CONF_TRACKING_MODE))
     device_tracker = config_entry.data.get(CONF_DEVICE_TRACKER)
 
 
@@ -191,7 +195,7 @@ class BlitzortungCoordinator:
         time_window_seconds,
         update_interval,
         enable_geocoding=True,
-        tracking_mode="static",
+        tracking_mode=TRACKING_MODE_STATIC,
         device_tracker=None,
         server_stats=False,
     ):
@@ -206,7 +210,7 @@ class BlitzortungCoordinator:
         self.time_window_seconds = time_window_seconds
         self.server_stats = server_stats
         self.enable_geocoding = enable_geocoding
-        self.tracking_mode = tracking_mode
+        self.tracking_mode = normalize_tracking_mode(tracking_mode)
         self.device_tracker = device_tracker
         self.last_time = 0
         self.sensors = []
@@ -217,6 +221,7 @@ class BlitzortungCoordinator:
             self.latitude, self.longitude, self.radius
         )
         self._disconnect_callbacks = []
+        self._geohash_unsubscribes = []
         self.unloading = False
         self._location_available = True
 
@@ -224,7 +229,8 @@ class BlitzortungCoordinator:
         self.geocoding_service = GeocodingService(hass) if enable_geocoding else None
 
         _LOGGER.info(
-            "lat: %s, lon: %s, radius: %skm, geohashes: %s",
+            "lat: %s, lon: %s, radius: %skm, geocoding: %s, tracking mode: %s, "
+            "device tracker: %s, geohashes: %s",
             self.latitude,
             self.longitude,
             self.radius,
@@ -274,7 +280,9 @@ class BlitzortungCoordinator:
         except (TypeError, ValueError):
             return None
 
-    def _update_location(self, new_latitude: float, new_longitude: float):
+    def _update_location(
+        self, new_latitude: float, new_longitude: float, resubscribe: bool = True
+    ):
         """Update the tracking location and recompute geohashes."""
         old_lat, old_lon = self.latitude, self.longitude
         self.latitude = new_latitude
@@ -293,30 +301,44 @@ class BlitzortungCoordinator:
                 self.geohash_overlap, new_geohash_overlap
             )
             self.geohash_overlap = new_geohash_overlap
-            
-            # Resubscribe to new geohashes if connected
-            if self.mqtt_client.connected:
+
+            # Resubscribe to new geohashes if connected. connect() passes
+            # resubscribe=False because it subscribes right afterwards anyway -
+            # doing both would leave every topic subscribed twice.
+            if resubscribe and self.mqtt_client.connected:
                 self.hass.async_create_task(self._resubscribe_geohashes())
 
-    async def _resubscribe_geohashes(self):
-        """Resubscribe to MQTT topics for new geohashes."""
-        try:
-            # Unsubscribe from all blitzortung topics
-            _LOGGER.debug("Resubscribing to geohashes: %s", self.geohash_overlap)
-            
-            # Subscribe to new geohashes
-            for geohash_code in self.geohash_overlap:
-                geohash_part = "/".join(geohash_code)
+    async def _subscribe_geohashes(self):
+        """Subscribe to the MQTT topics for the current geohashes."""
+        for geohash_code in self.geohash_overlap:
+            geohash_part = "/".join(geohash_code)
+            self._geohash_unsubscribes.append(
                 await self.mqtt_client.async_subscribe(
-                    "blitzortung/1.1/{}/#".format(geohash_part), self.on_mqtt_message, qos=0
+                    "blitzortung/1.1/{}/#".format(geohash_part),
+                    self.on_mqtt_message,
+                    qos=0,
                 )
-        except Exception as e:
-            _LOGGER.error("Error resubscribing to geohashes: %s", e)
+            )
+
+    @callback
+    def _unsubscribe_geohashes(self):
+        """Drop the subscriptions for the previous location."""
+        while self._geohash_unsubscribes:
+            self._geohash_unsubscribes.pop()()
+
+    async def _resubscribe_geohashes(self):
+        """Move the MQTT subscriptions over to the new geohashes."""
+        try:
+            _LOGGER.debug("Resubscribing to geohashes: %s", self.geohash_overlap)
+            self._unsubscribe_geohashes()
+            await self._subscribe_geohashes()
+        except Exception:
+            _LOGGER.exception("Error resubscribing to geohashes")
 
     @callback
     def _device_tracker_state_changed(self, event):
         """Handle device tracker state changes."""
-        if self.unloading or self.tracking_mode != "device_tracker":
+        if self.unloading or self.tracking_mode != TRACKING_MODE_DEVICE_TRACKER:
             return
             
         new_state = event.data.get("new_state")
@@ -326,11 +348,13 @@ class BlitzortungCoordinator:
         location = self._get_device_tracker_location()
         if location:
             new_lat, new_lon = location
+            # A reading we can use is what makes the location available again,
+            # whether or not the device actually moved since the last one.
+            self._location_available = True
             # Only update if location changed significantly (avoid micro-movements)
-            if (abs(new_lat - self.latitude) > 0.001 or 
+            if (abs(new_lat - self.latitude) > 0.001 or
                 abs(new_lon - self.longitude) > 0.001):
                 self._update_location(new_lat, new_lon)
-                self._location_available = True
         else:
             if self._location_available:
                 _LOGGER.warning("Device tracker %s location unavailable", self.device_tracker)
@@ -357,12 +381,12 @@ class BlitzortungCoordinator:
         _LOGGER.info("Connected to Blitzortung proxy mqtt server")
         
         # Set up device tracker monitoring if needed
-        if self.tracking_mode == "device_tracker" and self.device_tracker:
+        if self.tracking_mode == TRACKING_MODE_DEVICE_TRACKER and self.device_tracker:
             # Get initial location from device tracker
             location = self._get_device_tracker_location()
             if location:
                 new_lat, new_lon = location
-                self._update_location(new_lat, new_lon)
+                self._update_location(new_lat, new_lon, resubscribe=False)
                 _LOGGER.info("Initial device tracker location: %s, %s", new_lat, new_lon)
             else:
                 _LOGGER.warning("Could not get initial location from device tracker %s", self.device_tracker)
@@ -375,11 +399,7 @@ class BlitzortungCoordinator:
                 )
             )
         
-        for geohash_code in self.geohash_overlap:
-            geohash_part = "/".join(geohash_code)
-            await self.mqtt_client.async_subscribe(
-                "blitzortung/1.1/{}/#".format(geohash_part), self.on_mqtt_message, qos=0
-            )
+        await self._subscribe_geohashes()
         if self.server_stats:
             await self.mqtt_client.async_subscribe(
                 "$SYS/broker/#", self.on_mqtt_message, qos=0
@@ -415,15 +435,16 @@ class BlitzortungCoordinator:
             current_version = parse_version(__version__)
             if latest_version > current_version:
                 _LOGGER.info("new version is available: %s", latest_version_str)
-                self.hass.components.persistent_notification.async_create(
+                persistent_notification.async_create(
+                    self.hass,
+                    latest_version_message,
                     title=latest_version_title,
-                    message=latest_version_message,
                     notification_id="blitzortung_new_version_available",
                 )
 
     async def on_mqtt_message(self, message, *args):
-        for callback in self.callbacks:
-            callback(message)
+        for message_cb in self.callbacks:
+            message_cb(message)
         if message.topic.startswith("blitzortung/1.1"):
             lightning = json_loads_object(message.payload)
             self.compute_polar_coords(lightning)
@@ -454,8 +475,8 @@ class BlitzortungCoordinator:
                     lightning["location"] = "Geocoding Disabled"
                     
                 self.last_time = time.time()
-                for callback in self.lightning_callbacks:
-                    await callback(lightning)
+                for lightning_cb in self.lightning_callbacks:
+                    await lightning_cb(lightning)
                 for sensor in self.sensors:
                     sensor.update_lightning(lightning)
 
@@ -482,7 +503,7 @@ class BlitzortungCoordinator:
     @property
     def is_connected(self):
         return self.mqtt_client.connected and (
-            self.tracking_mode == "static" or self._location_available
+            self.tracking_mode == TRACKING_MODE_STATIC or self._location_available
         )
 
     async def _tick(self, *args):

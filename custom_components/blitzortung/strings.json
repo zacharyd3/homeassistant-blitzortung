@@ -17,31 +17,6 @@
           "device_tracker": "Only required when using device tracker mode"
         }
       },
-      "area": {
-        "state_attributes": {
-          "lat": {
-            "name": "Latitude"
-          },
-          "lon": {
-            "name": "Longitude"
-          },
-          "distance": {
-            "name": "Distance"
-          },
-          "azimuth": {
-            "name": "Azimuth"
-          },
-          "location": {
-            "name": "Full location"
-          },
-          "primary_area": {
-            "name": "Primary area"
-          },
-          "country": {
-            "name": "Country"
-          }
-        }
-      },
       "reconfigure": {
         "description": "Update configuration for {name}.",
         "data": {
@@ -54,7 +29,7 @@
     },
     "error": {
       "static_location_required": "Latitude and longitude are required for Static tracking mode",
-      "device_tracker_required": "Device Tracker selection is required for Device T mode"
+      "device_tracker_required": "A device tracker must be selected for Device Tracker mode"
     },
     "abort": {
       "already_configured": "Service is already configured",
@@ -70,7 +45,7 @@
           "radius": "Lightning detection radius (km / mi)",
           "time_window": "Time window (minutes, 0 - disabled)",
           "max_tracked_lightnings": "Max number of tracked lightnings",
-          "geocoding": "Enable location names for lightning strikes"
+          "enable_geocoding": "Enable location names for lightning strikes"
         }
       }
     }
@@ -78,8 +53,8 @@
   "selector": {
     "tracking_mode": {
       "options": {
-        "Static": "Static location",
-        "Device Tracker": "Follow device tracker"
+        "static": "Static location",
+        "device_tracker": "Follow device tracker"
       }
     }
   },
@@ -102,6 +77,31 @@
           },
           "lon": {
             "name": "Longitude"
+          }
+        }
+      },
+      "area": {
+        "state_attributes": {
+          "lat": {
+            "name": "Latitude"
+          },
+          "lon": {
+            "name": "Longitude"
+          },
+          "distance": {
+            "name": "Distance"
+          },
+          "azimuth": {
+            "name": "Azimuth"
+          },
+          "location": {
+            "name": "Full location"
+          },
+          "primary_area": {
+            "name": "Primary area"
+          },
+          "country": {
+            "name": "Country"
           }
         }
       }

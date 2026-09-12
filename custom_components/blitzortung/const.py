@@ -38,13 +38,17 @@ CONF_ENABLE_GEOCODING = "enable_geocoding"
 CONF_DEVICE_TRACKER = "device_tracker"
 CONF_TRACKING_MODE = "tracking_mode"
 
+TRACKING_MODE_STATIC = "static"
+TRACKING_MODE_DEVICE_TRACKER = "device_tracker"
+TRACKING_MODES = [TRACKING_MODE_STATIC, TRACKING_MODE_DEVICE_TRACKER]
+
 DEFAULT_IDLE_RESET_TIMEOUT = 120
 DEFAULT_RADIUS = 100
 DEFAULT_MAX_TRACKED_LIGHTNINGS = 100
 DEFAULT_TIME_WINDOW = 120
 DEFAULT_UPDATE_INTERVAL = datetime.timedelta(seconds=60)
 DEFAULT_ENABLE_GEOCODING = True
-DEFAULT_TRACKING_MODE = "Static"
+DEFAULT_TRACKING_MODE = TRACKING_MODE_STATIC
 
 ATTR_LAT = "lat"
 ATTR_LON = "lon"
@@ -53,3 +57,16 @@ ATTR_EXTERNAL_ID = "external_id"
 ATTR_PUBLICATION_DATE = "publication_date"
 
 BLIZORTUNG_URL = "https://map.blitzortung.org/#10/{lat}/{lon}"
+
+
+def normalize_tracking_mode(value: Any) -> str:
+    """Return the canonical slug for a stored tracking mode.
+
+    Config entries created before the tracking mode became a select selector
+    stored the English display strings ("Static", "Device Tracker") instead of
+    slugs, so anything comparing against the slugs silently never matched.
+    """
+    if not value:
+        return DEFAULT_TRACKING_MODE
+    slug = str(value).strip().lower().replace(" ", "_")
+    return slug if slug in TRACKING_MODES else DEFAULT_TRACKING_MODE

@@ -13,28 +13,39 @@ from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_DEVICE_TRACKER,
+    CONF_ENABLE_GEOCODING,
     CONF_MAX_TRACKED_LIGHTNINGS,
     CONF_RADIUS,
     CONF_TIME_WINDOW,
-    CONF_ENABLE_GEOCODING,
-    DEFAULT_MAX_TRACKED_LIGHTNINGS,
-    DEFAULT_RADIUS,
-    DEFAULT_TIME_WINDOW,
-    DEFAULT_ENABLE_GEOCODING,
-    CONF_DEVICE_TRACKER,
     CONF_TRACKING_MODE,
+    DEFAULT_ENABLE_GEOCODING,
     DEFAULT_MAX_TRACKED_LIGHTNINGS,
     DEFAULT_RADIUS,
     DEFAULT_TIME_WINDOW,
     DEFAULT_TRACKING_MODE,
     DOMAIN,
+    TRACKING_MODES,
+    TRACKING_MODE_STATIC,
+    normalize_tracking_mode,
+)
+
+# A select selector stores the slug and translates the label, so the value that
+# lands in the config entry stays stable no matter which language the user set
+# up the integration in.
+TRACKING_MODE_SELECTOR = selector.SelectSelector(
+    selector.SelectSelectorConfig(
+        options=TRACKING_MODES,
+        mode=selector.SelectSelectorMode.DROPDOWN,
+        translation_key=CONF_TRACKING_MODE,
+    )
 )
 
 RECONFIGURE_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_TRACKING_MODE, default=DEFAULT_TRACKING_MODE): vol.In(
-            ["Static", "Device Tracker"]
-        ),
+        vol.Required(
+            CONF_TRACKING_MODE, default=DEFAULT_TRACKING_MODE
+        ): TRACKING_MODE_SELECTOR,
         vol.Optional(CONF_LATITUDE): cv.latitude,
         vol.Optional(CONF_LONGITUDE): cv.longitude,
         vol.Optional(CONF_DEVICE_TRACKER): selector.EntitySelector(
@@ -42,6 +53,18 @@ RECONFIGURE_SCHEMA = vol.Schema(
         ),
     }
 )
+
+
+def _has_static_location(user_input: dict[str, Any]) -> bool:
+    """Return True when both coordinates were supplied.
+
+    Checked against None rather than falsiness: latitude 0 (the equator) and
+    longitude 0 (Greenwich) are perfectly valid coordinates.
+    """
+    return (
+        user_input.get(CONF_LATITUDE) is not None
+        and user_input.get(CONF_LONGITUDE) is not None
+    )
 
 
 class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -54,9 +77,11 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle the initial step."""
         errors = {}
-        if user_input is not None:            # Validate input based on tracking mode
-            if user_input[CONF_TRACKING_MODE] == "Static":
-                if not user_input.get(CONF_LATITUDE) or not user_input.get(CONF_LONGITUDE):
+        if user_input is not None:
+            # Validate input based on tracking mode
+            tracking_mode = normalize_tracking_mode(user_input[CONF_TRACKING_MODE])
+            if tracking_mode == TRACKING_MODE_STATIC:
+                if not _has_static_location(user_input):
                     errors["base"] = "static_location_required"
                 else:
                     await self.async_set_unique_id(
@@ -67,7 +92,7 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
                         title=user_input[CONF_NAME],
                         data={
                             CONF_NAME: user_input[CONF_NAME],
-                            CONF_TRACKING_MODE: user_input[CONF_TRACKING_MODE],
+                            CONF_TRACKING_MODE: tracking_mode,
                             CONF_LATITUDE: user_input[CONF_LATITUDE],
                             CONF_LONGITUDE: user_input[CONF_LONGITUDE],
                         },
@@ -90,7 +115,7 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
                         title=user_input[CONF_NAME],
                         data={
                             CONF_NAME: user_input[CONF_NAME],
-                            CONF_TRACKING_MODE: user_input[CONF_TRACKING_MODE],
+                            CONF_TRACKING_MODE: tracking_mode,
                             CONF_DEVICE_TRACKER: user_input[CONF_DEVICE_TRACKER],
                             # Set default coordinates for initial setup
                             CONF_LATITUDE: self.hass.config.latitude,
@@ -114,7 +139,7 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
                     ): str,
                     vol.Required(
                         CONF_TRACKING_MODE, default=DEFAULT_TRACKING_MODE
-                    ): vol.In(["Static", "Device Tracker"]),
+                    ): TRACKING_MODE_SELECTOR,
                     vol.Optional(
                         CONF_LATITUDE,
                         default=self.hass.config.latitude,
@@ -140,13 +165,17 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             # Validate input based on tracking mode
-            if user_input[CONF_TRACKING_MODE] == "Static":
-                if not user_input.get(CONF_LATITUDE) or not user_input.get(CONF_LONGITUDE):
+            tracking_mode = normalize_tracking_mode(user_input[CONF_TRACKING_MODE])
+            if tracking_mode == TRACKING_MODE_STATIC:
+                if not _has_static_location(user_input):
                     errors["base"] = "static_location_required"
                 else:
                     return self.async_update_reload_and_abort(
                         reconfigure_entry,
-                        data_updates=user_input,
+                        data_updates={
+                            **user_input,
+                            CONF_TRACKING_MODE: tracking_mode,
+                        },
                     )
             else:  # device_tracker mode
                 if not user_input.get(CONF_DEVICE_TRACKER):
@@ -154,11 +183,16 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
                 else:
                     # Keep existing coordinates for fallback
                     update_data = user_input.copy()
-                    if not update_data.get(CONF_LATITUDE):
-                        update_data[CONF_LATITUDE] = reconfigure_entry.data.get(CONF_LATITUDE, self.hass.config.latitude)
-                    if not update_data.get(CONF_LONGITUDE):
-                        update_data[CONF_LONGITUDE] = reconfigure_entry.data.get(CONF_LONGITUDE, self.hass.config.longitude)
-                    
+                    update_data[CONF_TRACKING_MODE] = tracking_mode
+                    if update_data.get(CONF_LATITUDE) is None:
+                        update_data[CONF_LATITUDE] = reconfigure_entry.data.get(
+                            CONF_LATITUDE, self.hass.config.latitude
+                        )
+                    if update_data.get(CONF_LONGITUDE) is None:
+                        update_data[CONF_LONGITUDE] = reconfigure_entry.data.get(
+                            CONF_LONGITUDE, self.hass.config.longitude
+                        )
+
                     return self.async_update_reload_and_abort(
                         reconfigure_entry,
                         data_updates=update_data,
@@ -168,7 +202,13 @@ class BlitortungConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
                 data_schema=RECONFIGURE_SCHEMA,
-                suggested_values=reconfigure_entry.data | (user_input or {}),
+                suggested_values={
+                    **(reconfigure_entry.data | (user_input or {})),
+                    CONF_TRACKING_MODE: normalize_tracking_mode(
+                        (user_input or {}).get(CONF_TRACKING_MODE)
+                        or reconfigure_entry.data.get(CONF_TRACKING_MODE)
+                    ),
+                },
             ),
             description_placeholders={"name": reconfigure_entry.title},
             errors=errors,
